@@ -11,7 +11,7 @@ use std::collections::BinaryHeap;
 use std::env;
 use std::time::Instant;
 
-const NUM_ENTRIES: usize = 100_000;
+const NUM_ENTRIES: usize = 10_000;
 const DATA_SIZE: usize = 3_000_000;
 const NUM_RUNS: usize = 100;
 const HOT_SIZE: usize = NUM_ENTRIES / 5; // a random 20% of the keys are "hot"
@@ -62,7 +62,7 @@ fn main() {
     let mut bytes_read: usize = 0;
 
     // Monitor the time it takes for each of the NUM_RUNS runs to complete
-    for run_num in 0..NUM_RUNS {
+    for run_num in 1..=NUM_RUNS {
         info!("Starting run {}", run_num);
         let start = Instant::now();
         for _ in 0..NUM_ENTRIES {
@@ -97,9 +97,15 @@ fn main() {
             }
         }
         let duration = start.elapsed();
-        info!("Time elapsed for {} gets is: {:?}", NUM_ENTRIES, duration);
+        info!("Time elapsed for {} KV gets: {:?}", NUM_ENTRIES, duration);
 
-        // after each run, move popular keys from warm table to hot table
+        // after every 10 runs, move popular keys from warm table to hot table
+        // and vice versa
+        if run_num % 10 != 0 {
+            continue;
+        }
+        info!("Moving keys between tables...");
+        let start = Instant::now();
         let mut warm_heap = BinaryHeap::<(usize, String)>::new();
         for (key, access_count) in &warm_access {
             warm_heap.push((*access_count, key.to_string()));
@@ -108,12 +114,14 @@ fn main() {
         for (key, access_count) in &hot_access {
             hot_heap.push((-(*access_count as isize), key.to_string()));
         }
+        let mut promotion_count = 0;
         while needs_promoting(&warm_heap, &hot_heap, hot_access.len()) {
             let (access_count, key) = warm_heap.pop().unwrap();
             debug!(
                 "Promoting {} with val {} from warm to hot",
                 key, access_count
             );
+            promotion_count += 1;
             warm_access.remove(&key);
             hot_access.insert(key.clone(), access_count);
             let write_txn = db.begin_write().unwrap();
@@ -127,6 +135,7 @@ fn main() {
             }
             write_txn.commit().unwrap();
         }
+        info!("Promoted {} keys to hot table", promotion_count);
         // trim hot table to HOT_SIZE by demoting least popular keys to warm table
         while hot_access.len() > HOT_SIZE {
             let (access_count, key) = hot_heap.pop().unwrap();
@@ -148,6 +157,8 @@ fn main() {
             }
             write_txn.commit().unwrap();
         }
+        let duration = start.elapsed();
+        info!("Time elapsed for promotions/demotions: {:?}", duration);
     }
 
     debug!("Hot table access stats: {:?}", hot_access.len());
